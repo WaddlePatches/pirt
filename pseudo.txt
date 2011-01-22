@@ -1,0 +1,38 @@
+** You can safely ignore this file. It's just my hacky kludge notes on the PDF format **
+** Special thanks to Daniel Klein **
+
+header: "%PDF-", 3B version, EOL
+
+whitespace: \t \n\r\0
+EOL: \r\n, \r, \n, for binary fields no \r
+hex: in <>, odd no. of characters = append 0
+dict: << >>
+%comment EXCEPT %%EOF and %PDF
+name: "/", identifier, any number (including 0) of non-delimiting non-whitespace characters
+
+
+Read last 1KiB, rfind('startxref'), str(decimal) seek value
+"xref"
+	starting object number, whitespace, number of objects in xref table
+	offset in file, whitespace, generation number, whitespace, [fn]
+		f = free, n = in use
+	each line fixed width
+
+object:
+	object number (unique id), ws, generation number, ws, "obj"
+
+dict: "<<", key/value pairs, ">>"
+	key = name
+
+reference: number, ws, number, ws, "R"
+
+trailer: immediately after first xref table found with startxref
+	find "/Prev", point to previous startxref
+
+
+looking for key "Subtype" = "/Image"
+	"/Filter" = "/DCTDecode", JPEG
+	"/Height", "/Width", update to new size
+	"/Length" = data length
+	">>", ws, "stream", (\r\n|\n), raw data
+

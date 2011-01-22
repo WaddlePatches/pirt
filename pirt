@@ -1,0 +1,270 @@
+#!/usr/bin/env python
+
+# pirt v1.0
+
+# Copyright (c) 2011 Ben Klein
+# Licensed under the Non-Profit Open Software License version 3.0 except as
+# follows:
+#  a) The Original Copyright Holder (OCH) of the Original Work reserves the
+#    right to re-license or sub-license the Original Work or Derivative Works
+#    authored by OCH without limitation; and
+#  b) Licensor grants You the right to re-license the Original Work or
+#    Derivative Works thereof under the original OSL 3.0 as described in
+#    section 17 only if no revenue whatsoever is derived from the distribution
+#    of the Original Work or Derivative Works thereof, or from support or
+#    services relating thereto.
+#  See the included file LICENSE or visit:
+#  http://www.opensource.org/licenses/NOSL3.0
+
+# Special thanks to Daniel Klein
+
+import sys,os,re
+import getopt
+
+import ImageFile
+import PDFKludge
+
+class pirtError(Exception):
+	pass
+
+PROG_NAME = ""
+VERSION = "1.0"
+def Warn(msg):
+	sys.stderr.write(PROG_NAME + ": " + msg + "\n")
+
+def version():
+	print "%s: v%s" % (PROG_NAME, VERSION)
+
+def usage():
+	print "Usage:"
+	print "  %s [-h|--version]" % PROG_NAME
+	print "  %s [-fivv] -xd directory input.pdf" % PROG_NAME
+	print "  %s [-fivv] -rd directory input.pdf output.pdf" % PROG_NAME
+	print "   -d directory  Where the JPEGs will be extracted to or replaced from"
+	print "   -f            Overwrite output file without warning"
+	print "   -h, --help    Display this help message"
+	print "   -i            Ask if output file exists [default]"
+	print "   -r            Replace mode. Output file argument is mandatory"
+	print "   -v            Verbose mode. Can be specified once or twice"
+	print "   --version     Display the version"
+	print "   -x            Extract mode. Output file argument is forbidden"
+
+def get_opts(cla):
+	options = {"verbose": 0, "force": False}
+	try:
+		opts, args = getopt.getopt(cla, "fhixrd:v", ["help","version"])
+	except getopt.GetoptError, err:
+		Warn(str(err))
+		usage()
+		sys.exit(2)
+
+	for o, a in opts:
+		if o in ("-h", "--help"):
+			version()
+			usage()
+			sys.exit()
+		elif o == "--version":
+			version()
+			sys.exit()
+		elif o == "-v":
+			options["verbose"] += 1
+		elif o == "-f":
+			options["force"] = True
+		elif o == "-i":
+			options["force"] = False
+		elif o == "-x":
+			options["mode"] = "extract"
+			if len(args) > 1:
+				Warn("too many arguments")
+				usage()
+				sys.exit(2)
+		elif o == "-r":
+			options["mode"] = "replace"
+			if len(args) < 2:
+				Warn("too few arguments")
+				usage()
+				sys.exit(2)
+			options["out"] = args[1]
+			try:
+				check = os.path.samefile(args[0], options["out"])
+			except:
+				check = False
+			if args[0] == options["out"] or check:
+				raise pirtError("detected that input and output files are the same. Forget it!")
+		elif o == "-d":
+			options["dir"] = a
+
+	# Handle options before arguments in case --help is used
+	if len(args) > 2 or len(args) < 1:
+		Warn("wrong number of arguments")
+		usage()
+		sys.exit(2)
+
+	if "mode" not in options or "dir" not in options:
+		usage()
+		sys.exit(2)
+
+	if not os.path.isdir(options["dir"]):
+		if options["mode"] == "extract":
+			os.mkdir(options["dir"])
+		elif options["mode"] == "replace":
+			raise pirtError("`%s' is not a directory" % options["dir"])
+
+	if options["mode"] == "replace" and os.path.exists(options["out"]):
+		if os.path.isfile(options["out"]):
+			if not options["force"]:
+				i = raw_input("File `%s' exists. Overwrite? [yN] " % options["out"])
+				if not i or i[0].lower() != "y":
+					raise pirtError("Aborting")
+		else:
+			raise pirtError("output file `%s' is not a regular file" % options["out"])
+
+	# Always need infile = args[0]
+	options["in"] = args[0]
+	return options
+
+if __name__ == "__main__":
+	PROG_NAME = os.path.basename(sys.argv[0])
+	pdf = None
+	try:
+		exit_code = 0
+		opts = get_opts(sys.argv[1:])
+
+		pdf = PDFKludge.PDFKludge()
+		pdf.open_pdf(opts["in"])
+		ret = pdf.get_init_xref()
+		# Kludgy way to get the maximum object number length
+		# Always want at least one leading 0 for the hell of it
+		pad = len(str(len(pdf.xref))) + 1
+
+		if opts["mode"] == "extract":
+			cur = None
+			# Go from between cur to nxt
+			# Add None at the end to ensure last node gets processed
+			for nxt in sorted(pdf.seekr.iterkeys()) + [None]:
+				if cur:
+					obj = pdf.seekr[cur]["obj"]
+					ret = pdf.get_stream_obj_at(cur, nxt)
+					if ret:
+						if opts["verbose"]:
+							print "Extracting image from object %d ..." % obj,
+							sys.stdout.flush()
+						meta, data = ret["meta"], ret["data"]
+						# DCTDecode means JPEG data
+						if data and "Filter" in meta and meta["Filter"] == "/DCTDecode" and "Length" in meta:
+							img = open(os.path.join(opts["dir"], "image-%s.jpg" % str(obj).rjust(pad, "0")), "wb")
+							img.write(data)
+							img.close()
+						if opts["verbose"]:
+							print "done"
+				cur = nxt
+		elif opts["mode"] == "replace":
+			outfile = open(opts["out"], "wb")
+			pdf.infile.seek(0)
+			seekr = sorted(pdf.seekr.iterkeys())
+			data = pdf.infile.read(seekr[0])
+			outfile.write(data)
+
+			is_img = True
+			max_obj = 0
+			new_x = {}
+			for i, seekpt in enumerate(seekr):
+				obj = pdf.seekr[seekpt]["obj"]
+				max_obj = max(max_obj, obj)
+				img_file = os.path.join(opts["dir"], "image-%s.jpg" % str(obj).rjust(pad, "0"))
+				if os.path.exists(img_file):
+					# Code taken from http://effbot.org/zone/pil-image-size.htm
+					p = ImageFile.Parser()
+					img = open(img_file, "r")
+					# Read in the first 4KiB (guess that's going to hold the whole header)
+					img_buf = img.read(4096)
+					p.feed(img_buf)
+					if p.image:
+						if opts["verbose"]:
+							if opts["verbose"] > 1 and not is_img:
+								print
+							print "Replacing image data of object %d ..." % obj,
+							sys.stdout.flush()
+						is_img = True
+						# Most important: get the new seek point for the current object
+						new_x[obj] = (outfile.tell(), pdf.xref[obj]["gen"], pdf.xref[obj]["use"])
+
+						# Build new object based on old one
+						old = pdf.get_stream_obj_at(seekpt, head_only=True)
+						# TODO: Support other image formats here; i.e. PNG
+						old["meta"]["Width"], old["meta"]["Height"] = p.image.size
+						old["meta"]["Length"] = os.path.getsize(img_file)
+						# Create the new object header
+						new = "%d 0 obj\n%s\nstream\n"  % (obj, pdf.dict_to_pdf(old["meta"]))
+
+						# Some of the image has already been read into memory.
+						# Output the new header and the full image.
+						outfile.write(new + img_buf + img.read())
+						outfile.write("endstream\nendobj\n")
+
+						img.close()
+						if opts["verbose"]:
+							print "done"
+							sys.stdout.flush()
+
+						# Spaghetti to prevent duplicating object preservation code
+						continue
+					else:
+						img.close()
+						Warn("oops! `%s' is not an image" % img_file)
+						# Continue to restore the original object; don't use the new data
+
+				if opts["verbose"] > 1:
+					if is_img:
+						print "Duplicating objects %d" % obj,
+						sys.stdout.flush()
+						is_img = False
+					else:
+						print obj,
+						sys.stdout.flush()
+				pdf.infile.seek(seekpt)
+				if i < len(seekr) - 1:
+					data = pdf.infile.read(seekr[i + 1])
+				else:
+					data = pdf.infile.read()
+				r = re.search("endobj" + PDFKludge.EOL, data)
+				new_x[obj] = (outfile.tell(), pdf.xref[obj]["gen"], pdf.xref[obj]["use"])
+				outfile.write(data[:r.end()])
+
+			if opts["verbose"] > 1:
+				if not is_img:
+					print
+			# Generate the new (flat) xref table
+			if opts["verbose"]:
+				print "Building new object cross-reference table"
+			init_xref = outfile.tell()
+			# xref table holds maximum object + object 0
+			outfile.write("xref\n0 %d\n" % (max_obj + 1))
+			seek_pad = 10
+			for i in xrange(0, max_obj + 1):
+				if i in new_x:
+					n = new_x[i]
+					ref = "%s %s %s " % (str(n[0]).rjust(seek_pad,"0"), str(n[1]).rjust(5,"0"), "n" if n[2] else "f")
+				else:
+					ref = "".rjust(seek_pad, "0") + " 65535 f "
+				outfile.write(ref + "\n")
+
+			# Write the new trailer
+			# /Prev has already been removed
+			if opts["verbose"]:
+				print "Finalising file with trailer"
+			outfile.write("trailer %s\n" % pdf.dict_to_pdf(pdf.trailer))
+
+			# Create the new startxref
+			outfile.write("startxref\n%d\n" % init_xref)
+
+			outfile.write("%%EOF\n")
+			outfile.close()
+
+	except (PDFKludge.PDFKludgeError, pirtError), e:
+		Warn(str(e))
+		exit_code = 1
+	finally:
+		if pdf and pdf.infile:
+			pdf.infile.close()
+	sys.exit(exit_code)
